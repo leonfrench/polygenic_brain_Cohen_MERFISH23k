@@ -1,0 +1,18 @@
+.conda-env/
+__pycache__/
+.DS_Store
+*.part
+*.staging/
+.pytest_cache/
+.env
+.env.*
+.streamlit/secrets.toml
+
+# The Zenodo download (raw input), the Allen Brain Cell Atlas tables and the MGI marker lists are large or downloaded
+# when missing; keep them out of version control.
+/data/cellxgene_WT_labels.h5ad
+/data/Allen-CCF-2020/
+/data/reference/
+# The bins script also writes per-bin counts and each cell's bin, which the app does not read.
+/data/rttamp-wt-bins178um/counts/
+/data/rttamp-wt-bins178um/cell_bins.parquet
