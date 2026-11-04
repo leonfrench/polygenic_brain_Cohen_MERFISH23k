@@ -1,8 +1,8 @@
 """RT&T-AMP-MERFISH hemisections as square bins of cells, each the pseudobulk of the cells inside it, as for the Stereo-seq and MERFISH apps.
 
-The prepared cell dataset (--cells, from prepare_rttamp_cells.py) gives the cells, their CCF positions (µm), labels, expression
-matrix rows and the gene universe. It stores ranks, not counts, so the counts of the raw h5ad in --raw are read again, with source
-genes merged into the universe as its gene_mapping.parquet records. Cells are assigned by centroid to the squares of one lattice
+The prepared cell dataset (--cells, from prepare_rttamp_cells.py) gives the cells, their CCF positions (µm), labels, source
+file and matrix rows, and the gene universe. It stores ranks, not counts, so the counts of the deposit's two h5ad files in --raw
+are read again, with source genes merged into the universe as its gene_mapping.parquet records (the isoforms are dropped). Cells are assigned by centroid to the squares of one lattice
 shared by all sections, so every bin has the same size and smaller sections simply have fewer bins. --bin-um sets the side; --bins
 sets it so that the widest section spans that many squares. A bin's counts are the summed transcripts of its cells, ranked within
 the bin as the cells are.
@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import scipy
 
-from prepare_rttamp_cells import EXPRESSION, LEVELS, RAW, section_counts, sha256, rank_rows, validate_rows
+from prepare_rttamp_cells import SOURCES, LEVELS, RAW, read_matrix, section_counts, sha256, rank_rows, validate_rows
 
 ROOT = Path(__file__).resolve().parents[1]
 PARENT = {'cell_type': 'cell_group', 'cell_group': 'cell_class'}
@@ -34,8 +34,8 @@ def main_labels(codes, labels, local, n_bins):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--raw', type=Path, default=RAW, help='Folder of cellxgene_WT_labels.h5ad.')
-    parser.add_argument('--cells', type=Path, default=ROOT/'data/rttamp-wt', help='Prepared cell dataset (prepare_rttamp_cells.py).')
+    parser.add_argument('--raw', type=Path, default=RAW, help='Folder of the deposit\'s h5ad files.')
+    parser.add_argument('--cells', type=Path, default=ROOT/'data/rttamp-genes', help='Prepared cell dataset (prepare_rttamp_cells.py).')
     parser.add_argument('--sections', nargs='*', help='Section (sample) numbers of the cell dataset, e.g. 1 3. Default: all of them.')
     size = parser.add_mutually_exclusive_group(required=True)
     size.add_argument('--bin-um', type=float, help='Side of the squares in µm, rounded to whole coordinate units.')
@@ -51,13 +51,13 @@ def main():
     requested = args.sections or list(entries)
     if any(s not in entries for s in requested):
         raise SystemExit(f'Sections not in {args.cells}: {[s for s in requested if s not in entries]}')
-    slices = [s for s in entries if s in requested]  # the cell dataset's sample order
+    slices = [s for s in entries if s in requested]  # the cell dataset's anterior-to-posterior order
     um_per_unit = source['coordinates']['um_per_unit']
 
     genes = pd.read_parquet(args.cells/'genes.parquet').sort_values('gene_index').reset_index(drop=True)
     mapping = pd.read_parquet(args.cells/'gene_mapping.parquet')
     g = len(genes)
-    cells = pd.read_parquet(args.cells/'cells.parquet', columns=['cell_index', 'slice', 'h5ad_row', 'rx', 'ry', 'n_counts', *LEVELS])
+    cells = pd.read_parquet(args.cells/'cells.parquet', columns=['cell_index', 'slice', 'source', 'h5ad_row', 'rx', 'ry', 'n_counts', *LEVELS])
     cells = cells[cells.slice.isin(slices)].sort_values('cell_index').reset_index(drop=True)
     if args.bin_um:
         side = round(args.bin_um/um_per_unit)
@@ -84,14 +84,8 @@ def main():
     def record(path):
         manifest_files.append(dict(path=str(path.relative_to(staging)), bytes=path.stat().st_size, sha256=sha256(path)))
 
-    with h5py.File(args.raw/EXPRESSION, 'r') as h5:
-        if not np.array_equal(h5['var/_index'].asstr()[:], mapping.source_gene.to_numpy()):
-            raise ValueError('The expression matrix must list the genes of gene_mapping.parquet, in order')
-        indptr = h5['X/indptr'][:].astype(np.int64)
-        indices, data = h5['X/indices'][:], h5['X/data'][:]
-    remap = pd.Index(genes.symbol).get_indexer(mapping.symbol)  # source genes that share a symbol are summed
-    if (remap < 0).any():
-        raise ValueError('Every measured gene must be in the universe')
+    # Each file's counts, with every column's universe index; source genes that share a symbol are summed.
+    matrices = {name: read_matrix(args.raw/SOURCES[name], mapping, genes.symbol.to_numpy()) for name in sorted(set(cells.source))}
 
     rng = np.random.default_rng(args.seed)
     tables, cell_bins, slice_entries, validated, offset = [], [], [], 0, 0
@@ -99,6 +93,7 @@ def main():
         t = time.perf_counter()
         part = cells[cells.slice.eq(slice_id)]
         m = len(part)
+        indptr, indices, data, remap, _ = matrices[part.source.iloc[0]]
         rows, cols, values = section_counts(indptr, indices, data, part.h5ad_row.to_numpy(), remap, g)
         row = ((part.ry.to_numpy()-origin[1])//side).astype(np.int64)
         col = ((part.rx.to_numpy()-origin[0])//side).astype(np.int64)
@@ -152,7 +147,7 @@ def main():
         format=source['format'], layout='square-bins-v2', dataset=out.name,
         created_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         source=dict(path=os.path.relpath(args.cells, out), dataset=source['dataset'], created_utc=source['created_utc'],
-                    expression=dict(path=EXPRESSION, sha256=source['sources']['expression']['sha256'])),
+                    expression={name: dict(path=file, sha256=source['sources']['expression'][name]['sha256']) for name, file in SOURCES.items()}),
         n_bins=len(bins), n_cells=len(cells), n_genes=g, n_slices=len(slices), seed=args.seed,
         bin_um=bin_um, bin_side=side, origin_rxry=list(origin), lattice=dict(rows=n_rows, cols=n_cols),
         observations='square bins of cells; counts are the summed transcripts of the cells whose centroid lies in the bin',

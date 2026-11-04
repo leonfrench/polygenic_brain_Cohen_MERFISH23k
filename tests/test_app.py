@@ -9,8 +9,8 @@ from spatial_app.bins import MIN_BIN_CELLS
 from spatial_app.layout import dot_size
 
 ROOT = Path(__file__).resolve().parents[1]
-DATA = ROOT/'data/rttamp-wt'
-BINS = ROOT/'data/rttamp-wt-bins178um'
+DATA = ROOT/'data/rttamp-genes'
+BINS = ROOT/'data/rttamp-genes-bins178um'
 pytestmark = pytest.mark.skipif(not (DATA/'manifest.json').exists(), reason='prepared RT&T-AMP-MERFISH dataset not available')
 
 
@@ -30,14 +30,16 @@ def finish(app, manifest):
     raise AssertionError('scoring did not finish')
 
 
-def test_four_hemisections_score_and_fill_both_tables(manifest):
+def test_seven_hemisections_score_and_fill_both_tables(manifest):
     app = AppTest.from_file(str(ROOT/'app.py'), default_timeout=180).run()
     assert not app.exception
-    assert manifest['n_slices'] == 4 and len(app.session_state['scores']) == manifest['n_cells']
+    assert manifest['n_slices'] == 7 and len(app.session_state['scores']) == manifest['n_cells']
     header = next(m.value for m in app.markdown if 'hemisections' in m.value)
-    assert header == '**Cohen-WT · 4 coronal hemisections of one mouse: samples 1 and 2 anterior, 3 and 4 posterior**'
+    assert header == '**Cohen-genes · 7 coronal hemisections, anterior to posterior**'
     panels = app.session_state['cell_plot_transport']['geometry']['panels']
-    assert [p['label'] for p in panels] == ['1', '2', '3', '4']
+    assert [p['label'] for p in panels] == [s['id'] for s in manifest['slices']] == ['1', '2', '4', '7', '5', '6', '3']
+    planes = [s['ccf_x_um'] for s in manifest['slices']]  # anterior to posterior by the CCF plane each section matches
+    assert planes == sorted(planes) and min(s['plane_match'] for s in manifest['slices']) > 0.9
     geometry = app.session_state['cell_plot_transport']['geometry']  # cells are drawn 4% wider than their median spacing
     assert geometry['dot_scale'] == 1.04 and geometry['dot'] == pytest.approx(1.04*dot_size(pd.read_parquet(DATA/'cells.parquet').sort_values('draw_order', ignore_index=True)))
     assert app.session_state['job']['query'].universe_size == manifest['n_genes'] == 22919
@@ -59,7 +61,7 @@ def test_four_hemisections_score_and_fill_both_tables(manifest):
     matching = next(e for e in app.expander if e.label.startswith('Gene matching'))
     assert matching.label == 'Gene matching · 6 targets used in a 22,919-gene universe' and not matching.warning
     assert cell_table.iloc[0, :2].tolist() == ['Cholinergic_TH', 'Cholinergic neurons'] and region_table.iloc[0, 0] == 'MH'
-    assert region_table.iloc[0]['# sections'] == 1  # the habenula is in sample 4 only
+    assert region_table.iloc[0]['# sections'] == 2  # the habenula is in samples 4 and 7, registered to the same plane
 
 
 def test_class_group_and_substructure_levels_and_colour_modes(manifest):

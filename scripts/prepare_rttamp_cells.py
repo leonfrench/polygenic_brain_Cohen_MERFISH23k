@@ -1,21 +1,24 @@
 """RT&T-AMP-MERFISH mouse brain hemisections (Cohen et al. 2026) -> exact sparse ranks in per-section batches.
 
-Input in --raw (data/, as downloaded from the Zenodo deposit, record 20682863):
-  cellxgene_WT_labels.h5ad   the whole-transcriptome ('WT') samples 1-4, four coronal hemisections of one mouse:
-                             146,863 segmented cells x 22,930 genes, raw counts (CSR; rows not grouped by sample);
-                             obs: sample, cell_label (41 cell types from the paper's clustering), ccf_z and ccf_y (Allen CCF,
-                             micrometres), annot (the ABC atlas parcellation_index of the cell), global_x and global_y
-                             (experimental coordinates, micrometres), volume, num_z
-The two Allen Brain Cell Atlas parcellation tables are read from --atlas (data/) and the MGI marker lists from
---reference (data/reference); both are downloaded when missing.
+Input in --raw (data/, as downloaded from the Zenodo deposit, record 20682863), seven coronal hemisections:
+  cellxgene_WT_labels.h5ad   the whole-transcriptome ('WT') samples 1-4 of one mouse: 146,863 segmented cells x 22,930
+                             genes, raw counts (CSR; rows not grouped by sample)
+  cellxgene_ISO_labels.h5ad  the isoform ('ISO') samples 5-7 of two mice: 129,563 cells x 32,684 features, raw counts;
+                             the same 22,930 genes (ISO_Codebook_1 and 2) and 9,754 isoforms (ISO_Codebook_3, not used)
+  Both obs: sample, cell_label (cell types from the paper's clustering), ccf_z and ccf_y (Allen CCF, micrometres), annot
+  (the ABC atlas parcellation_index of the cell), global_x and global_y (experimental coordinates, micrometres), volume, num_z
+The two Allen Brain Cell Atlas parcellation tables and its 25 µm annotation volume are read from --atlas (data/) and the MGI
+marker lists from --reference (data/reference); all are downloaded when missing.
 
-Every cell is kept. The universe is every measured gene, coding or not, under its current MGI symbol where that
-is unambiguous; source symbols that now name the same gene are summed before ranking.
+Every cell is kept. The universe is every measured gene, coding or not, under its current MGI symbol where that is
+unambiguous; source symbols that now name the same gene are summed before ranking. The files give no anterior-posterior
+coordinate, so each section's coronal plane is the one whose annotation matches most of its cells' parcellations (each
+cell's was read from the annotation at its registered position); sections run anterior to posterior by that plane.
 
   .conda-env/bin/python scripts/prepare_rttamp_cells.py --force
 """
 from pathlib import Path
-import argparse, colorsys, datetime, hashlib, json, platform, shutil, time
+import argparse, colorsys, datetime, gzip, hashlib, json, platform, shutil, struct, time
 import h5py
 import numpy as np
 import pandas as pd
@@ -28,13 +31,21 @@ MGI_URLS = {'MRK_List2.rpt': 'https://www.informatics.jax.org/downloads/reports/
 ATLAS_URL = 'https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/metadata/'
 ATLAS = dict(parcellation='Allen-CCF-2020/20230630/views/parcellation_to_parcellation_term_membership_acronym.csv',
              parcellation_terms='Allen-CCF-2020/20230630/parcellation_term.csv')
-RAW = ROOT/'data'  # the folder of EXPRESSION, also read by prepare_rttamp_bins.py
-DATASET = 'Cohen-WT'
-EXPRESSION = 'cellxgene_WT_labels.h5ad'
+RAW = ROOT/'data'  # the folder of the deposit's files, also read by prepare_rttamp_bins.py
+DATASET = 'Cohen-genes'
 ZENODO = 'https://zenodo.org/records/20682863'
-# Samples 1 and 2 are anterior sections and 3 and 4 posterior ones (the deposit's README), all from one mouse.
-POSITIONS = {'1': 'anterior', '2': 'anterior', '3': 'posterior', '4': 'posterior'}
-# The paper's groups of its 41 cell types (STAR Methods, ligand-receptor analysis; Fig. 4G,H, where 'neurons' is 'Neu').
+SOURCES = {'WT': 'cellxgene_WT_labels.h5ad', 'ISO': 'cellxgene_ISO_labels.h5ad'}
+# Each sample's file set and mouse (the deposit's README and the paper): the WT samples 1-4 are two anterior and two posterior
+# sections of one mouse, the ISO samples 5-7 posterior sections of two mice (5 and 6 from one, 7 from the other). Neither source
+# says whether an ISO mouse is the WT mouse, so mice are numbered within their file set.
+SAMPLES = {**dict.fromkeys(['1', '2', '3', '4'], ('WT', 'WT mouse')), '5': ('ISO', 'ISO mouse 1'), '6': ('ISO', 'ISO mouse 1'),
+           '7': ('ISO', 'ISO mouse 2')}
+GENE_CODEBOOKS = ('WT_Codebook_1', 'WT_Codebook_2', 'ISO_Codebook_1', 'ISO_Codebook_2')  # ISO_Codebook_3 holds the isoforms
+VOLUME = 'Allen-CCF-2020/20250331/annotation_25.nii.gz'
+VOLUME_URL = 'https://allen-brain-cell-atlas.s3.us-west-2.amazonaws.com/image_volumes/' + VOLUME
+VOXEL_UM = 25
+# The paper's groups of its cell types (STAR Methods, ligand-receptor analysis; Fig. 4G,H, where 'neurons' is 'Neu'): the WT
+# clustering's 41 types and the ISO clustering's Striatum_other, which the paper puts with the striatal neurons.
 GROUPS = {**dict.fromkeys(['Cortex L2/3 IT', 'Cortex L2/3 RSP', 'Cortex L4 RSP', 'Cortex L4/5 IT', 'Cortex L5 IT', 'Cortex L6 IT'],
                           'Cortex IT excitatory neurons'),
           **dict.fromkeys(['Cortex 6b', 'Cortex L5 ET', 'Cortex L5 NP', 'Cortex L6 CT'], 'Cortex non-IT excitatory neurons'),
@@ -42,7 +53,7 @@ GROUPS = {**dict.fromkeys(['Cortex L2/3 IT', 'Cortex L2/3 RSP', 'Cortex L4 RSP',
           **dict.fromkeys(['Hippocampus_CA1', 'Hippocampus_CA2-CA3', 'Hippocampus_DG', 'Hippocampus_IG'], 'Hippocampus neurons'),
           'Thalamus': 'Thalamus neurons', 'Hypothalamus': 'Hypothalamus neurons', 'Midbrain': 'Midbrain neurons',
           **dict.fromkeys(['Cholinergic_STR-HY', 'Cholinergic_TH'], 'Cholinergic neurons'),
-          **dict.fromkeys(['Striatum_D1', 'Striatum_D2', 'Striatum_LSr', 'Striatum_OT'], 'Striatum neurons'),
+          **dict.fromkeys(['Striatum_D1', 'Striatum_D2', 'Striatum_LSr', 'Striatum_OT', 'Striatum_other'], 'Striatum neurons'),
           **dict.fromkeys(['Inhibitory_Lamp5', 'Inhibitory_Pvalb', 'Inhibitory_Sst', 'Inhibitory_Vip'], 'Inhibitory neurons'),
           # Non-neuronal types are groups of their own, as is 'Other' (a class of its own in Fig. 4A, absent from the groups).
           **{t: t for t in ['Astrocytes', 'Choroid Plexus', 'Endothelial', 'Ependymal', 'Microglia', 'NFOLs', 'OPCs', 'Oligodendrocytes',
@@ -274,18 +285,63 @@ def categorical(h5, column, group='obs'):
     return (categories.asstr()[:] if categories.dtype.kind == 'O' else categories[:].astype(str))[codes]
 
 
+def read_matrix(path, mapping, symbols):
+    """One file's counts (CSR), each column's universe index (-1 for features outside it, the isoforms) and each row's gene total."""
+    with h5py.File(path, 'r') as h5:
+        if h5['X'].attrs.get('encoding-type') != 'csr_matrix':
+            raise ValueError(f'{path.name}: expected a CSR count matrix')
+        source = h5['var/_index'].asstr()[:]
+        gene = np.isin(categorical(h5, 'codebook', 'var'), GENE_CODEBOOKS)
+        indptr = h5['X/indptr'][:].astype(np.int64)
+        indices, data = h5['X/indices'][:], h5['X/data'][:]
+    if sorted(source[gene]) != sorted(mapping.source_gene):
+        raise ValueError(f'{path.name} must measure the genes of the universe')
+    remap = np.full(len(source), -1, np.int64)
+    remap[gene] = pd.Index(symbols).get_indexer(mapping.set_index('source_gene').symbol.reindex(source[gene]))
+    if not (np.diff(indptr) > 0).all():
+        raise ValueError(f'{path.name}: every cell needs counts')
+    totals = np.add.reduceat(np.where(remap[indices] >= 0, data, 0), indptr[:-1])  # exact, as no row is empty
+    return indptr, indices, data, remap, totals
+
+
 def section_counts(indptr, indices, data, rows, remap, g):
     """(row, gene_index, count) entries of the given matrix rows (row = position in rows), sorted by row and gene.
 
-    Source genes that share a universe symbol are summed.
+    Source genes that share a universe symbol are summed; features outside the universe (remap -1) are dropped.
     """
     starts, lengths = indptr[rows], indptr[rows+1] - indptr[rows]
     gather = np.repeat(starts - np.r_[0, np.cumsum(lengths)[:-1]], lengths) + np.arange(lengths.sum())
-    values = data[gather]
+    values, cols = data[gather], remap[indices[gather]]
     if (values <= 0).any() or not np.array_equal(values, np.round(values)):
         raise ValueError('Stored counts must be positive integers')
-    key, inverse = np.unique(np.repeat(np.arange(len(rows)), lengths)*g + remap[indices[gather]], return_inverse=True)
-    return key // g, key % g, np.bincount(inverse, weights=values).astype(np.int64)
+    keep = cols >= 0
+    key, inverse = np.unique(np.repeat(np.arange(len(rows)), lengths)[keep]*g + cols[keep], return_inverse=True)
+    return key // g, key % g, np.bincount(inverse, weights=values[keep]).astype(np.int64)
+
+
+def read_annotation(path, shape=(528, 320, 456)):
+    """The 25 µm CCF parcellation volume (a parcellation_index per voxel) as [AP, DV, ML], from anterior, dorsal and left.
+
+    A NIfTI-1 file whose first voxel axis runs posterior and second ventral, as its srow affine must confirm.
+    """
+    raw = gzip.decompress(Path(path).read_bytes())
+    dim = struct.unpack('<8h', raw[40:56]); datatype, = struct.unpack('<h', raw[70:72]); offset, = struct.unpack('<f', raw[108:112])
+    srow = np.array(struct.unpack('<12f', raw[280:328])).reshape(3, 4)
+    if raw[344:347] != b'n+1' or dim[:4] != (3, *shape) or datatype != 512 or not (srow[1, 0] < 0 and srow[2, 1] < 0):
+        raise ValueError('Expected the CCF annotation as a uint16 NIfTI-1 volume ordered anterior to posterior and dorsal to ventral')
+    return np.frombuffer(raw, '<u2', count=int(np.prod(shape)), offset=int(offset)).reshape(shape, order='F')
+
+
+def section_plane(volume, annot, y, z):
+    """The coronal plane (VOXEL_UM index, anterior first) whose annotation matches most of a section's cells, and that fraction.
+
+    Each cell's parcellation was read from the annotation at its registered position, so the plane the section was registered
+    to matches nearly every cell, and the match falls off within a few planes.
+    """
+    yi = np.clip((y // VOXEL_UM).astype(np.int64), 0, volume.shape[1]-1)
+    zi = np.clip((z // VOXEL_UM).astype(np.int64), 0, volume.shape[2]-1)
+    match = (volume[:, yi, zi] == annot).mean(axis=1)
+    return int(match.argmax()), float(match.max())
 
 
 def majority(groups, members):
@@ -333,9 +389,9 @@ def region_levels(cells, terms):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--raw', type=Path, default=RAW, help='Folder of cellxgene_WT_labels.h5ad.')
-    parser.add_argument('--atlas', type=Path, default=ROOT/'data', help='Folder of the Allen Brain Cell Atlas tables, in the bucket layout.')
-    parser.add_argument('--out', type=Path, default=ROOT/'data/rttamp-wt')
+    parser.add_argument('--raw', type=Path, default=RAW, help='Folder of the deposit\'s h5ad files.')
+    parser.add_argument('--atlas', type=Path, default=ROOT/'data', help='Folder of the Allen Brain Cell Atlas tables and volume, in the bucket layout.')
+    parser.add_argument('--out', type=Path, default=ROOT/'data/rttamp-genes')
     parser.add_argument('--reference', type=Path, default=ROOT/'data/reference')
     parser.add_argument('--batch-cells', type=int, default=16384, help='Maximum cells per batch.')
     parser.add_argument('--batch-entries', type=int, default=12_000_000,
@@ -353,42 +409,47 @@ def main():
     (staging/'pseudobulk').mkdir()
 
     tables = {name: download(ATLAS_URL+path, args.atlas/path) for name, path in ATLAS.items()}
+    volume = read_annotation(download(VOLUME_URL, args.atlas/VOLUME))
     parcellation = pd.read_csv(tables['parcellation'], keep_default_na=False).set_index('parcellation_index')
     terms = pd.read_csv(tables['parcellation_terms'], dtype=str, keep_default_na=False)
     current, pc, withdrawn = mgi_tables(args.reference)
-    expression = args.raw/EXPRESSION
-    with h5py.File(expression, 'r') as h5:
-        if h5['X'].attrs.get('encoding-type') != 'csr_matrix':
-            raise ValueError('Expected a CSR count matrix')
-        source = h5['var/_index'].asstr()[:]
-        mapping, symbols = gene_universe(source, categorical(h5, 'codebook', 'var'), current, pc, withdrawn)
-        g = len(symbols)
-        if not 1 < g < 32768:
-            raise ValueError('uint16 doubled ranks require 2 <= genes <= 32767')
-        remap = pd.Index(symbols).get_indexer(mapping.symbol)  # every source gene has a universe symbol
-        sample = categorical(h5, 'sample')
-        if sorted(set(sample)) != sorted(POSITIONS):
-            raise ValueError(f'Expected samples {sorted(POSITIONS)}')
-        # Cells grouped by sample (the source rows are not), keeping the source order within each.
-        order = np.argsort(sample, kind='stable')
-        cells = pd.DataFrame({'slice': sample[order], 'cell_id': h5['obs/_index'].asstr()[:][order], 'h5ad_row': order,
-                              'rx': h5['obs/ccf_z'][:][order], 'ry': h5['obs/ccf_y'][:][order],
-                              'x': h5['obs/global_x'][:][order], 'y': h5['obs/global_y'][:][order],
-                              'volume': h5['obs/volume'][:][order], 'num_z': h5['obs/num_z'][:][order],
-                              'parcellation_index': h5['obs/annot'][:][order], 'cell_type': categorical(h5, 'cell_label')[order]})
-        indptr = h5['X/indptr'][:].astype(np.int64)
-        indices, data = h5['X/indices'][:], h5['X/data'][:]
-    n = len(cells)
-    if len(indptr) != n + 1 or not np.isfinite(cells[['rx', 'ry', 'x', 'y']].to_numpy()).all():
-        raise ValueError('Every cell needs a matrix row and finite coordinates')
-    if not (np.diff(indptr) > 0).all():
-        raise ValueError('Every cell needs counts')
-    source_totals = np.add.reduceat(data, indptr[:-1])  # per matrix row; exact, as no row is empty
+    paths = {name: args.raw/file for name, file in SOURCES.items()}
+    with h5py.File(paths['WT'], 'r') as h5:  # the universe is the WT file's genes, which the ISO file measures too
+        mapping, symbols = gene_universe(h5['var/_index'].asstr()[:], categorical(h5, 'codebook', 'var'), current, pc, withdrawn)
+    g = len(symbols)
+    if not 1 < g < 32768:
+        raise ValueError('uint16 doubled ranks require 2 <= genes <= 32767')
+    frames, matrices = [], {}
+    for name, path in paths.items():
+        with h5py.File(path, 'r') as h5:
+            annot = h5['obs/annot'][:]  # stored as floats in the ISO file
+            if not np.array_equal(annot, np.round(annot)):
+                raise ValueError(f'{path.name}: parcellation indices must be whole numbers')
+            frames.append(pd.DataFrame({'slice': categorical(h5, 'sample'), 'source': name, 'cell_id': h5['obs/_index'].asstr()[:],
+                                        'h5ad_row': np.arange(len(annot)), 'rx': h5['obs/ccf_z'][:], 'ry': h5['obs/ccf_y'][:],
+                                        'x': h5['obs/global_x'][:], 'y': h5['obs/global_y'][:], 'volume': h5['obs/volume'][:],
+                                        'num_z': h5['obs/num_z'][:], 'parcellation_index': annot.astype(np.int64),
+                                        'cell_type': categorical(h5, 'cell_label')}))
+        matrices[name] = read_matrix(path, mapping, symbols)
+        if len(matrices[name][0]) != len(frames[-1]) + 1:
+            raise ValueError(f'{path.name}: every cell needs a matrix row')
+    cells = pd.concat(frames, ignore_index=True)
+    if set(zip(cells.slice, cells.source)) != {(s, source) for s, (source, _) in SAMPLES.items()}:
+        raise ValueError(f'Expected samples {sorted(SAMPLES)} in their file sets')
+    if cells.cell_id.duplicated().any() or not np.isfinite(cells[['rx', 'ry', 'x', 'y']].to_numpy()).all():
+        raise ValueError('Cells need unique names and finite coordinates')
     if not parcellation.index.is_unique:
         raise ValueError('Parcellation indices must be unique')
     unknown = sorted(set(cells.parcellation_index) - set(parcellation.index))
     if unknown:
         raise ValueError(f'Parcellation indices missing from the atlas table: {unknown[:10]}')
+    # Each section's registered coronal plane; sections run anterior to posterior, ties (adjacent sections) in sample order.
+    planes = {s: section_plane(volume, p.parcellation_index.to_numpy(), p.ry.to_numpy(), p.rx.to_numpy()) for s, p in cells.groupby('slice')}
+    slices = sorted(SAMPLES, key=lambda s: (planes[s][0], int(s)))
+    rank = cells.slice.map({s: i for i, s in enumerate(slices)}).to_numpy()
+    cells = cells.iloc[np.lexsort((cells.h5ad_row.to_numpy(), rank))].reset_index(drop=True)  # source order within each section
+    rank = np.sort(rank)
+    n = len(cells)
     cells.insert(0, 'cell_index', np.arange(n, dtype=np.uint32))
     cells.insert(cells.columns.get_loc('cell_type'), 'cell_group', cells.cell_type.map(GROUPS))
     cells.insert(cells.columns.get_loc('cell_group'), 'cell_class', cells.cell_group.map(CLASSES))
@@ -398,9 +459,7 @@ def main():
     cells['batch'] = ''; cells['batch_row'] = np.zeros(n, np.int32)
     cells['n_counts'] = np.zeros(n, np.int64); cells['n_genes_detected'] = np.zeros(n, np.int64)
     levels = {**cell_levels(cells), **region_levels(cells, terms)}
-    slices = sorted(POSITIONS)
-    bounds = {s: (int(np.searchsorted(cells.slice.to_numpy(), s)), int(np.searchsorted(cells.slice.to_numpy(), s, side='right')))
-              for s in slices}
+    bounds = {s: (int(np.searchsorted(rank, i)), int(np.searchsorted(rank, i, side='right'))) for i, s in enumerate(slices)}
 
     # Exact ranks, randomly ordered per-section batches and per-section pseudobulk counts.
     label_index = {level: np.unique(cells[level].to_numpy()) for level in LEVELS}
@@ -417,10 +476,14 @@ def main():
         start, stop = bounds[slice_id]
         part = cells.iloc[start:stop]
         m = len(part)
+        source, mouse = SAMPLES[slice_id]
+        indptr, indices, data, remap, source_totals = matrices[source]
         rows, cols, values = section_counts(indptr, indices, data, part.h5ad_row.to_numpy(), remap, g)
         n_counts = np.bincount(rows, weights=values, minlength=m).astype(np.int64)
-        if not np.array_equal(n_counts, source_totals[part.h5ad_row.to_numpy()]):  # merging symbols keeps every count
+        if not np.array_equal(n_counts, source_totals[part.h5ad_row.to_numpy()]):  # merging symbols keeps every gene count
             raise ValueError(f'{slice_id}: cell totals changed when genes were merged')
+        if (n_counts <= 0).any():
+            raise ValueError(f'{slice_id}: every cell needs gene counts')
         cells.loc[part.index, 'n_counts'] = n_counts
         cells.loc[part.index, 'n_genes_detected'] = np.bincount(rows, minlength=m)
         per_slice[slice_id] = np.bincount(cols, minlength=g)
@@ -460,12 +523,15 @@ def main():
         path = staging/'pseudobulk'/f'{slice_id}.npz'
         np.savez_compressed(path, **arrays)
         record(path, slice=slice_id, layout='pseudobulk')
-        slice_entries.append(dict(id=slice_id, sample=int(slice_id), position=POSITIONS[slice_id], n_cells=m,
+        plane, match = planes[slice_id]
+        slice_entries.append(dict(id=slice_id, sample=int(slice_id), source=source, mouse=mouse, n_cells=m,
+                                  ccf_plane=plane, ccf_x_um=plane*VOXEL_UM + VOXEL_UM/2, plane_match=round(match, 4),
                                   cell_index_start=start, cell_index_stop=stop,
                                   bbox_rxry=[float(part.rx.min()), float(part.ry.min()), float(part.rx.max()), float(part.ry.max())],
                                   unassigned_cells=int(part.region_substructure.eq('unassigned').sum()),
                                   batches=batches, pseudobulk=str(path.relative_to(staging)), rank_seconds=round(time.perf_counter()-t, 2)))
-        print(f'sample {slice_id}: {m:,} cells ranked into {len(batches)} batches in {time.perf_counter()-t:.1f}s', flush=True)
+        print(f'sample {slice_id} ({source}, plane {(plane + 0.5)*VOXEL_UM/1000:.2f} mm, {match:.1%} matched): {m:,} cells ranked into '
+              f'{len(batches)} batches in {time.perf_counter()-t:.1f}s', flush=True)
 
     genes = (mapping.groupby('symbol').agg(mgi_id=('mgi_id', 'first'), name=('name', 'first'), feature_type=('feature_type', 'first'),
                                            codebook=('codebook', lambda s: '|'.join(sorted(set(s)))),
@@ -484,23 +550,28 @@ def main():
         format='sparse-doubled-average-ranks-v1', layout='per-slice-random-batches-v1', dataset=DATASET,
         created_utc=datetime.datetime.now(datetime.timezone.utc).isoformat(),
         n_cells=n, n_genes=g, n_slices=len(slices), seed=args.seed, batch_cells=args.batch_cells, batch_entries=args.batch_entries,
-        observations='RT&T-AMP-MERFISH segmented cells of four coronal hemisections of one mouse (the deposit\'s whole-transcriptome '
-                     'samples 1-4), as annotated in cellxgene_WT_labels.h5ad; counts are decoded transcripts per cell',
+        observations='RT&T-AMP-MERFISH segmented cells of seven coronal hemisections: the deposit\'s whole-transcriptome '
+                     'samples 1-4 (cellxgene_WT_labels.h5ad) and isoform samples 5-7 (cellxgene_ISO_labels.h5ad, gene features only), '
+                     'as annotated there; counts are decoded transcripts per cell',
         coordinates=dict(columns='rx, ry', units='micrometres in the Allen CCF: rx = ccf_z (medial-lateral, midline at 5,700), '
                                                   'ry = ccf_y (dorsal-ventral, dorsal up)', um_per_unit=1.0,
                          raw='x, y are global_x, global_y, the experimental coordinates (micrometres)'),
+        section_order=f'anterior to posterior by ccf_x_um, the centre of the {VOXEL_UM} µm CCF coronal plane whose annotation matches '
+                      'most of the section\'s cell parcellations (plane_match); ties keep sample order',
         region_assignment='ABC atlas parcellation (Allen-CCF-2020) of each cell\'s registered position, from obs annot '
                           '(its parcellation_index); unassigned = outside the parcellation',
-        sources={'expression': dict(path=EXPRESSION, sha256=sha256(expression), url=ZENODO),
+        sources={'expression': {name: dict(path=file, sha256=sha256(paths[name]), url=ZENODO) for name, file in SOURCES.items()},
                  'paper': 'Cohen et al., Cell 189, 6189-6207 (2026), doi:10.1016/j.cell.2026.06.027',
                  **{name: dict(url=ATLAS_URL+path, sha256=sha256(tables[name])) for name, path in ATLAS.items()},
+                 'annotation_volume': dict(url=VOLUME_URL, sha256=sha256(args.atlas/VOLUME)),
                  'mgi': {k: dict(url=v, sha256=sha256(args.reference/k)) for k, v in MGI_URLS.items()}},
         gene_mapping_methods=mapping.mapping_method.value_counts().to_dict(),
         feature_types=genes.feature_type.replace('', 'not in MGI').value_counts().to_dict(),
         merged_source_genes=int(len(mapping) - g),
         ranks=dict(direction='ascending: larger rank means higher expression', ties='average', scale=2,
                    zeros='all unstored genes have rank zero_rank2 / 2; stored ranks are absolute',
-                   universe='every measured gene, under its current MGI symbol where unambiguous',
+                   universe='every measured gene (those of the WT file, which the ISO file measures too), under its current MGI symbol '
+                            'where unambiguous; the ISO isoform features are not used',
                    duplicate_genes='sum counts before ranking', auroc='(sum(rank of set) - k*(k+1)/2) / (k*(G-k))'),
         annotation_levels={k: dict(kind=v['kind'], title=v['title'], n_labels=len(v['labels'])) for k, v in levels.items()},
         pseudobulk=dict(description='per section and annotation level: summed counts per (label, gene), '

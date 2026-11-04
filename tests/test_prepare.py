@@ -1,4 +1,4 @@
-import sys
+import gzip, struct, sys
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -9,7 +9,8 @@ from scipy.stats import rankdata
 h5py = pytest.importorskip('h5py')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'scripts'))
 from prepare_rttamp_cells import (CLASSES, GROUPS, MIN_CONTRAST, NAMES, TYPE_BAND, UNKNOWN, categorical, cell_levels,  # noqa: E402
-                                  contrast, gene_universe, map_genes, oklab, pseudobulk, rank_rows, section_counts, separate_colors)
+                                  contrast, gene_universe, map_genes, oklab, pseudobulk, rank_rows, read_annotation,
+                                  read_matrix, section_counts, section_plane, separate_colors)
 
 
 def mgi():
@@ -60,6 +61,53 @@ def test_section_counts_select_rows_and_sum_genes_that_share_a_symbol():
     assert values.dtype == np.int64
     with pytest.raises(ValueError, match='positive integers'):
         section_counts(indptr, indices, data*0.5, np.array([0]), np.array([0, 1, 1, 2]), 3)
+    # A feature outside the universe (an isoform, remap -1) is dropped.
+    rows, cols, values = section_counts(indptr, indices, data, np.array([2, 0]), np.array([0, 1, -1, 2]), 3)
+    assert rows.tolist() == [0, 1] and cols.tolist() == [2, 1] and values.tolist() == [1, 3]
+
+
+def test_read_matrix_maps_gene_columns_and_drops_isoforms(tmp_path):
+    with h5py.File(tmp_path/'iso.h5ad', 'w') as h5:
+        x = h5.create_group('X'); x.attrs['encoding-type'] = 'csr_matrix'
+        x['indptr'] = np.array([0, 2, 4]); x['indices'] = np.array([0, 2, 1, 0], np.int32); x['data'] = np.array([2., 5, 1, 1])
+        h5['var/_index'] = np.array(['G2', 'G1', 'G2-201'], dtype=h5py.string_dtype())  # two genes and one isoform
+        h5['var/codebook/categories'] = np.array(['ISO_Codebook_1', 'ISO_Codebook_3'], dtype=h5py.string_dtype())
+        h5['var/codebook/codes'] = np.array([0, 0, 1], np.int8)
+    mapping = pd.DataFrame({'source_gene': ['G1', 'G2'], 'symbol': ['G1', 'G2']})
+    indptr, indices, data, remap, totals = read_matrix(tmp_path/'iso.h5ad', mapping, np.array(['G1', 'G2']))
+    assert remap.tolist() == [1, 0, -1] and totals.tolist() == [2, 2]  # the isoform's 5 counts are not a gene's
+    with pytest.raises(ValueError, match='genes of the universe'):
+        read_matrix(tmp_path/'iso.h5ad', pd.DataFrame({'source_gene': ['G1', 'G3'], 'symbol': ['G1', 'G3']}), np.array(['G1', 'G3']))
+
+
+def nifti(volume, srow):
+    """A gzipped little-endian NIfTI-1 file of a uint16 volume, voxels in Fortran order after a 352-byte header."""
+    header = bytearray(352)
+    struct.pack_into('<i', header, 0, 348)
+    struct.pack_into('<8h', header, 40, 3, *volume.shape, 1, 1, 1, 1)
+    struct.pack_into('<hh', header, 70, 512, 16)
+    struct.pack_into('<f', header, 108, 352.0)
+    struct.pack_into('<12f', header, 280, *np.asarray(srow, float).ravel())
+    header[344:348] = b'n+1\0'
+    return gzip.compress(bytes(header) + volume.astype('<u2').tobytes(order='F'))
+
+
+def test_read_annotation_needs_axes_running_posterior_and_ventral(tmp_path):
+    volume = np.arange(24).reshape(4, 3, 2)
+    ccf = [[0, 0, 0.025, -5.695], [-0.025, 0, 0, 5.35], [0, -0.025, 0, 5.22]]  # the ABC atlas volume's srow
+    (tmp_path/'a.nii.gz').write_bytes(nifti(volume, ccf))
+    np.testing.assert_array_equal(read_annotation(tmp_path/'a.nii.gz', shape=(4, 3, 2)), volume)
+    (tmp_path/'b.nii.gz').write_bytes(nifti(volume, [[0, 0, 0.025, 0], [0.025, 0, 0, 0], [0, -0.025, 0, 0]]))  # anterior last
+    with pytest.raises(ValueError, match='anterior to posterior'):
+        read_annotation(tmp_path/'b.nii.gz', shape=(4, 3, 2))
+
+
+def test_section_plane_finds_the_plane_the_parcellation_was_read_from():
+    volume = np.zeros((5, 2, 2), np.uint16)
+    volume[2] = [[1, 2], [0, 0]]; volume[3] = [[1, 2], [3, 4]]  # 25 µm voxels: rows dorsal-ventral, columns medial-lateral
+    annot = np.array([1, 2, 3, 4]); y = np.array([0., 10, 30, 40]); z = np.array([0., 30, 5, 49])
+    assert section_plane(volume, annot, y, z) == (3, 1.0)
+    assert section_plane(volume, np.array([1, 2, 9, 9]), y, z)[0] == 2  # ties go to the first (more anterior) plane
 
 
 def test_rank_rows_matches_rankdata_with_ties_zeros_and_empty_rows():
@@ -98,12 +146,12 @@ def test_separate_colors_splits_identical_colours_only():
 
 
 def test_groups_and_classes_follow_the_paper():
-    assert len(GROUPS) == 41 and len(set(GROUPS.values())) == 23 and len(set(CLASSES.values())) == 13
+    assert len(GROUPS) == 42 and len(set(GROUPS.values())) == 23 and len(set(CLASSES.values())) == 13
     members = lambda group: sorted(t for t, g in GROUPS.items() if g == group)
     assert members('Cortex IT excitatory neurons') == ['Cortex L2/3 IT', 'Cortex L2/3 RSP', 'Cortex L4 RSP', 'Cortex L4/5 IT',
                                                        'Cortex L5 IT', 'Cortex L6 IT']
     assert members('Cortex non-IT excitatory neurons') == ['Cortex 6b', 'Cortex L5 ET', 'Cortex L5 NP', 'Cortex L6 CT']
-    assert members('Striatum neurons') == ['Striatum_D1', 'Striatum_D2', 'Striatum_LSr', 'Striatum_OT']
+    assert members('Striatum neurons') == ['Striatum_D1', 'Striatum_D2', 'Striatum_LSr', 'Striatum_OT', 'Striatum_other']  # the ISO set's
     assert sum(c == 'Neurons' for c in CLASSES.values()) == 11  # the paper's eleven neuron groups
     assert CLASSES['Other'] == 'Other' and CLASSES['Oligodendrocytes'] == 'Oligodendrocytes'
 

@@ -19,9 +19,9 @@ from spatial_app.orthologs import SPECIES, map_input
 from spatial_app.bins import MIN_BIN_CELLS, load_bins, bin_scores
 
 ROOT = Path(__file__).resolve().parent
-DATA = Path(os.environ.get('RTTAMP_APP_DATA', str(ROOT/'data/rttamp-wt'))).resolve()
+DATA = Path(os.environ.get('RTTAMP_APP_DATA', str(ROOT/'data/rttamp-genes'))).resolve()
 # Square bins of cells (scripts/prepare_rttamp_bins.py), one more colour mode when built from these cells.
-BINS = Path(os.environ.get('RTTAMP_APP_BINS', str(ROOT/'data/rttamp-wt-bins178um'))).resolve()
+BINS = Path(os.environ.get('RTTAMP_APP_BINS', str(ROOT/'data/rttamp-genes-bins178um'))).resolve()
 MODES = ('Gene-set AUROC', 'Cell type AUROC', 'Region AUROC')
 LABEL_MODES = ('Cell type', 'Region')  # plain label colours, listed last (after the bin mode)
 CELL_LEVELS = ('cell_class', 'cell_group', 'cell_type')
@@ -152,7 +152,7 @@ if st.session_state.get('dataset_version') != version:
     st.session_state.dataset_version = version
     reset_scores()
 
-selected = slice_ids  # the four hemisections, in sample order (anterior, then posterior)
+selected = slice_ids  # every hemisection, anterior to posterior (by the CCF plane each was registered to)
 
 with st.sidebar:
     species_label, species_selector = st.columns([1.8, 1.4], gap='small', vertical_alignment='center')
@@ -215,9 +215,7 @@ with st.sidebar:
 mode = st.session_state.colour_mode
 st.markdown('<div style="color:#000;font-size:24px;font-weight:400;line-height:1.3;">'
             'Polygenic enrichment tool for the whole-transcriptome RT&T-AMP-MERFISH mouse brain data by Cohen et al.</div>', unsafe_allow_html=True)
-positions = {p: [s for s in selected if slice_info[s]['position'] == p] for p in ('anterior', 'posterior')}
-st.markdown(f"**{manifest['dataset']} · {len(selected)} coronal hemisections of one mouse: samples "
-            + ', '.join(f"{' and '.join(ids)} {p}" for p, ids in positions.items() if ids) + '**')
+st.markdown(f"**{manifest['dataset']} · {len(selected)} coronal hemisection{'s' if len(selected) > 1 else ''}, anterior to posterior**")
 view, view_index = display_cells(str(DATA), data_version, tuple(selected))
 plan = [b for group in zip_longest(*(slice_info[s]['batches'] for s in selected)) for b in group if b]
 chart_version = f"{version}:{'|'.join(selected)}"
