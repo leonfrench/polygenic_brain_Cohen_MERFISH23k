@@ -154,7 +154,7 @@ if st.session_state.get('dataset_version') != version:
 
 selected = slice_ids  # every hemisection, anterior to posterior (by the CCF plane each was registered to)
 # All in one row: the hemisections are taller than wide, so the default two rows (four and three) made the plot up to 900 px
-# tall; one row keeps it at the viewer's 440 px minimum on most screens, like the Stereo-seq app's two rows of eight slices.
+# tall; one row keeps it at the viewer's 440 px minimum on most screens, the Stereo-seq app's height.
 panel_columns = len(selected)
 
 with st.sidebar:
