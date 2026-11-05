@@ -38,6 +38,7 @@ def test_seven_hemisections_score_and_fill_both_tables(manifest):
     assert header == '**Cohen-genes · 7 coronal hemisections, anterior to posterior**'
     panels = app.session_state['cell_plot_transport']['geometry']['panels']
     assert [p['label'] for p in panels] == [s['id'] for s in manifest['slices']] == ['1', '2', '4', '7', '5', '6', '3']
+    assert {p['y'] for p in panels} == {0.0}  # one row, which keeps the plot at the viewer's minimum height on most screens
     planes = [s['ccf_x_um'] for s in manifest['slices']]  # anterior to posterior by the CCF plane each section matches
     assert planes == sorted(planes) and min(s['plane_match'] for s in manifest['slices']) > 0.9
     geometry = app.session_state['cell_plot_transport']['geometry']  # cells are drawn 4% wider than their median spacing
@@ -114,6 +115,7 @@ def test_bins_are_one_more_colour_mode_and_rescored_for_a_new_gene_set():
     geometry = app.session_state['cell_plot_transport']['geometry']
     assert (geometry['items'], geometry['marker'], geometry['um_per_unit'], geometry['noun']) == ('bins', 'square', 1.0, 'sections')
     assert geometry['dot_scale'] == 1.0  # bin squares keep their side
+    assert {p['y'] for p in geometry['panels']} == {0.0} and len(geometry['panels']) == 7  # one row, as for the cells
     app.text_area(key='target_input').set_value('Gfap Aqp4 Aldh1l1').run()
     assert not app.exception and app.radio(key='colour_mode').value == 'Gene-set AUROC'  # a new gene set starts on the cells
     assert any(c.value.startswith('Each dot is one cell') for c in app.caption)

@@ -153,6 +153,9 @@ if st.session_state.get('dataset_version') != version:
     reset_scores()
 
 selected = slice_ids  # every hemisection, anterior to posterior (by the CCF plane each was registered to)
+# All in one row: the hemisections are taller than wide, so the default two rows (four and three) made the plot up to 900 px
+# tall; one row keeps it at the viewer's 440 px minimum on most screens, like the Stereo-seq app's two rows of eight slices.
+panel_columns = len(selected)
 
 with st.sidebar:
     species_label, species_selector = st.columns([1.8, 1.4], gap='small', vertical_alignment='center')
@@ -340,7 +343,7 @@ def render_bins():
                    version=f"{BINS}:{bin_manifest['created_utc']}", mode=mode, cell_level=cell_level, region_level=region_level,
                    cell_aurocs={}, region_aurocs={}, clip=0, filename=f"{manifest['dataset']}-bins-spatial",
                    um_per_unit=bin_manifest['coordinates']['um_per_unit'], noun='sections', hover=BIN_HOVER,
-                   absolute=True, items='bins', marker='square')
+                   absolute=True, items='bins', marker='square', columns=panel_columns)
         st.caption(f"Each square is a {bin_manifest['bin_um']:g} µm bin of one lattice shared by all sections, the pseudobulk of the cells whose "
                    'centroid lies in it; its gene-set AUROC ranks genes within the bin, as for single cells. '
                    f'Grey bins are not scored: they have fewer than {MIN_BIN_CELLS} cells, or no gene set has been scored yet. '
@@ -360,7 +363,8 @@ def render_chart(cell_table, region_table):
         cell_chart(view, scores, slices=selected, annotations=annotations, version=chart_version, mode=mode,
                    cell_level=cell_level, region_level=region_level, cell_aurocs=aucs(cell_table), region_aurocs=aucs(region_table),
                    highlight=st.session_state.get('highlight_request'), clip=COLOUR_CLIP, filename=f"{manifest['dataset']}-spatial",
-                   um_per_unit=manifest['coordinates']['um_per_unit'], noun='sections', hover=HOVER, dot_scale=DOT_SCALE)
+                   um_per_unit=manifest['coordinates']['um_per_unit'], noun='sections', hover=HOVER, dot_scale=DOT_SCALE,
+                   columns=panel_columns)
         st.caption('Each dot is one cell at its CCF-registered position, with dorsal up and the midline on the left of each hemisection; '
                    'every panel uses the same frame and scale. '
                    f'Grey cells are not scored yet. Gene-set AUROC colours are relative within each section ({low} to {high} percentile, range shown above each panel), '

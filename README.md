@@ -2,7 +2,7 @@
 
 A Streamlit app for the whole-transcriptome RT&T-AMP-MERFISH data of Cohen et al. (2026, *Cell*): seven coronal mouse brain
 hemisections, 276,426 cells and 22,930 measured genes. Enter a gene set; every cell gets an exact set-versus-complement AUROC from its
-gene expression ranks, shown on the seven hemisections in two rows, anterior to posterior. The app also tests whether the gene set is
+gene expression ranks, shown on the seven hemisections in one row, anterior to posterior. The app also tests whether the gene set is
 specifically expressed in each **cell type** and each **brain region**, using pseudobulk profiles as in the
 [SEA-AD polygenic tester](https://github.com/leonfrench/SEA_AD_multi_polygenic_app). It is a cell-based relative of the
 [spatial fetal app](https://github.com/leonfrench/spatial_fetal_app), and works like the apps for the
@@ -35,7 +35,7 @@ Open http://localhost:8501. `requirements.txt` is enough to run the app on the p
 
 ## Using the app
 
-- **Sections**: all seven samples in two rows (four and three), anterior to posterior and labelled by sample number: 1, 2, 4, 7, 5, 6, 3.
+- **Sections**: all seven samples in one row, anterior to posterior and labelled by sample number: 1, 2, 4, 7, 5, 6, 3.
   Samples 1–4 are from one mouse, 5 and 6 from one mouse and 7 from another; the paper does not say whether the mouse of 1–4 is one
   of these. The files give no anterior–posterior coordinate, so preprocessing estimates one (see [Preprocessing](#preprocessing)):
   samples 1 and 2 sit at 4.14 mm (striatum and lateral septum), 4 and
@@ -71,16 +71,17 @@ Open http://localhost:8501. `requirements.txt` is enough to run the app on the p
   `Cortex IT excitatory neurons`) and 13 cell classes (Fig. 4A: `Neurons`, the 11 non-neuronal classes and `Other`, 9,270 cells; the WT
   set's 3,792 have a mixed marker profile, with some `Slc17a7`, `Gad2` and `Flt1`). The tooltip spells out `NFOLs`, `OPCs`, `SMCs` and
   `VLMCs`.
-- **Plot**: one panel per section, all sharing the same CCF frame and scale in micrometres, on a black background. Dots are drawn 4%
-  wider than the median nearest-cell spacing (~14 µm; `DOT_SCALE` in `app.py`). AUROC ranges differ between sections, so gene-set AUROC
-  colours are relative within each section: each is scaled between its own 1st and 99th percentiles, which are shown above its panel,
-  and the legend is in arbitrary units. This also absorbs the ISO sections' lower depth (see [Data](#data)). Hover gives the exact AUROC.
-  The label AUROC modes (one pooled value per label) share one scale clipped at the 1st and 99th percentiles of the cells shown. The
-  clip is `COLOUR_CLIP` in `app.py`. Colours only; the statistics are unchanged. Drag to pan, scroll to zoom, double-click to reset,
-  click a legend entry to highlight that label, and save the current view as PNG. Zooming out stops at the fitted view; from there the
-  wheel scrolls the page (a pinch or ctrl+wheel never zooms the page). Hover shows a cell's gene-set AUROC, then its cell type, its
-  structure (name, then acronym in brackets) with the sample, and its substructure; the class, group or division is added when that
-  level is chosen in the sidebar.
+- **Plot**: one panel per section, all sharing the same CCF frame and scale in micrometres, on a black background. One row keeps the
+  plot 440 px tall on most screens, as in the Stereo-seq version; two rows of these tall hemisections made it up to 900 px tall
+  (`panel_columns` in `app.py`). Dots are drawn 4% wider than the median nearest-cell spacing (~14 µm; `DOT_SCALE` in `app.py`). AUROC
+  ranges differ between sections, so gene-set AUROC colours are relative within each section: each is scaled between its own 1st and
+  99th percentiles, which are shown above its panel, and the legend is in arbitrary units. This also absorbs the ISO sections' lower
+  depth (see [Data](#data)). Hover gives the exact AUROC. The label AUROC modes (one pooled value per label) share one scale clipped at
+  the 1st and 99th percentiles of the cells shown. The clip is `COLOUR_CLIP` in `app.py`. Colours only; the statistics are unchanged.
+  Drag to pan, scroll to zoom, double-click to reset, click a legend entry to highlight that label, and save the current view as PNG.
+  Zooming out stops at the fitted view; from there the wheel scrolls the page (a pinch or ctrl+wheel never zooms the page). Hover shows
+  a cell's gene-set AUROC, then its cell type, its structure (name, then acronym in brackets) with the sample, and its substructure;
+  the class, group or division is added when that level is chosen in the sidebar.
 - **Tables**: cell type and region expression specificity across all sections (AUROC, p-value and the Benjamini–Hochberg adjusted
   pFDR), with CSV downloads, plus a download of every cell's score once scoring completes. The tables use pseudobulk profiles, not
   cell scores, so they appear as soon as the gene set is valid. Tick a row's checkbox to colour the plot by that table's specificity
