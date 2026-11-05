@@ -51,7 +51,7 @@ def test_randomized_against_pairwise_and_subset_ranking():
 
 
 def test_real_shard_full_and_custom_background():
-    root=Path(__file__).resolve().parents[1]/'data/rttamp-wt'
+    root=Path(__file__).resolve().parents[1]/'data/rttamp-genes'
     if not (root/'manifest.json').exists():
         pytest.skip('prepared dataset not available')
     manifest=json.loads((root/'manifest.json').read_text())
